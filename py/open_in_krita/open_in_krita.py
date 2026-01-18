@@ -854,16 +854,14 @@ class FetchFromKrita:
 def get_node_class_mappings():
     """返回节点类映射"""
     return {
-        "FetchFromKrita": FetchFromKrita,
-        "OpenInKrita": FetchFromKrita  # 向后兼容的别名
+        "FetchFromKrita": FetchFromKrita
     }
 
 
 def get_node_display_name_mappings():
     """返回节点显示名称映射"""
     return {
-        "FetchFromKrita": "从Krita获取数据 (支持Alpha通道)",
-        "OpenInKrita": "从Krita获取数据 (支持Alpha通道)"  # 向后兼容
+        "FetchFromKrita": "从Krita获取数据 (支持Alpha通道)"
     }
 
 
