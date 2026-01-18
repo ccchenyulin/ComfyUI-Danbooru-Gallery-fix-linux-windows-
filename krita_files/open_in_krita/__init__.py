@@ -12,12 +12,12 @@ from datetime import datetime
 
 # 创建启动标记文件（无论如何都要创建）
 def _create_startup_marker():
-    """创建启动标记文件 - 用于诊断"""
+    """创建启动标记文件 - 用于诊断（改为共享目录）"""
     try:
-        marker_dir = Path(tempfile.gettempdir()) / "open_in_krita"
+        # Windows 侧共享目录路径（A:\D\open_in_krita）
+        marker_dir = Path("A:/D/open_in_krita")
         marker_dir.mkdir(parents=True, exist_ok=True)
         marker_file = marker_dir / "_plugin_loaded.txt"
-
         with open(marker_file, 'w', encoding='utf-8') as f:
             f.write(f"插件版本: {__version__}\n")
             f.write(f"加载时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -25,8 +25,7 @@ def _create_startup_marker():
             f.write(f"Python路径: {sys.executable}\n")
             f.write(f"标记文件路径: {marker_file}\n")
             f.write("="*60 + "\n")
-
-        print(f"[OpenInKrita] ✓ 启动标记文件已创建: {marker_file}")
+        print(f"[OpenInKrita] ✓ 启动标记文件已创建（共享目录）: {marker_file}")
         return True
     except Exception as e:
         print(f"[OpenInKrita] ✗ 创建启动标记失败: {e}")
@@ -91,3 +90,4 @@ except Exception as e:
         pass
 
     raise
+

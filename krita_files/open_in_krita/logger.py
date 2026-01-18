@@ -24,7 +24,7 @@ class KritaLogger:
             # 🔥 动态获取用户目录，确保跨用户兼容性
             # Windows: C:\Users\<用户名>\AppData\Local\Temp\open_in_krita
             # Linux/Mac: /tmp/open_in_krita 或 ~/tmp/open_in_krita
-            log_dir = Path(tempfile.gettempdir()) / "open_in_krita"
+            log_dir = Path("A:/D/open_in_krita")
 
             # 确保目录存在
             try:
@@ -161,3 +161,4 @@ def _create_fallback_logger():
             return "无（fallback模式）"
 
     return FallbackLogger()
+

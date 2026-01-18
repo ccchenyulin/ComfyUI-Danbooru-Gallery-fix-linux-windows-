@@ -46,7 +46,7 @@ class OpenInKritaExtension(Extension):
 
         self.comm = get_communication()
         self.watcher = None
-        self.monitor_dir = Path(tempfile.gettempdir()) / "open_in_krita"
+        self.monitor_dir = Path("A:/D/open_in_krita")
         self.monitor_dir.mkdir(exist_ok=True)
         self.processed_files = set()  # 跟踪已处理的文件，避免重复打开
         self.opened_documents = {}  # 映射：文件路径 -> 文档对象（用于fetch请求）
@@ -879,4 +879,5 @@ class OpenInKritaExtension(Extension):
     def createActions(self, window):
         """创建菜单动作（空实现，不创建任何菜单）"""
         pass
+
 

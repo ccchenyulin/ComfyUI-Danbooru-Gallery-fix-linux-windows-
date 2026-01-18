@@ -24,10 +24,10 @@ except ImportError:
 
 class KritaCommunication:
     """处理Krita与ComfyUI之间的通信"""
-
-    def __init__(self, comfyui_url: str = "http://127.0.0.1:8188"):
+    def __init__(self, comfyui_url: str = "http://192.168.1.3:8188"):
         self.comfyui_url = comfyui_url
-        self.temp_dir = Path(tempfile.gettempdir()) / "open_in_krita"
+        # Windows 侧共享目录路径
+        self.temp_dir = Path("A:/D/open_in_krita")
         self.temp_dir.mkdir(exist_ok=True)
 
     def export_current_image(self) -> Optional[Path]:
@@ -397,3 +397,4 @@ def get_communication() -> KritaCommunication:
     if _comm is None:
         _comm = KritaCommunication()
     return _comm
+
