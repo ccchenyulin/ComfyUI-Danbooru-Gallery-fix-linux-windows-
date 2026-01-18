@@ -1,3 +1,9 @@
+# comfyui在archlinux启动但comfyui的前端网页是在Windows下运行
+==以下所有修复都是基于以上环境==
+
+2026年1月18日导入模块改为使用相对路径修复节点缺失问题
+
+
 # Aaalice的定制节点
 
 **中文** | [English](README_EN.md)
