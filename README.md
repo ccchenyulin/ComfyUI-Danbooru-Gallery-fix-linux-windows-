@@ -7,7 +7,7 @@
 修复从krita获取图像节点问题重写krita_files/open_in_krita下的所有文件匹配源代码逻辑从源代码的临时文件修改为局域网临时共享目录，新增ARGB四通道和RGB三通道下拉选择
 核心: 把krita输出的图像临时存储到局域网临时共享目录A:\D\open_in_krita,此节点包里的从krita获取数据节点加载局域网临时共享目录下的图像
 
-
+20点32分新增节点发送图像到krita
 
 
 把krita_files下的open_in_krita文件夹复制到krita插件目录下如：C:\Users\mwh12\Pictures\krita-x64-5.2.14\share\krita\pykrita
