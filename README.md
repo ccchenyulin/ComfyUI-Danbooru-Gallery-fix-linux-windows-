@@ -1,4 +1,4 @@
-# comfyui在archlinux启动但comfyui的前端网页是在Windows下运行
+# comfyui在archlinux启动但comfyui的前端网页是在Windows下运行,使用open-list挂载archlinux本地目录供局域网访问,挂载目录为/mnt/d
 ==以下所有修复都是基于以上环境==
 
 2026年1月18日导入模块改为使用相对路径修复节点缺失问题
