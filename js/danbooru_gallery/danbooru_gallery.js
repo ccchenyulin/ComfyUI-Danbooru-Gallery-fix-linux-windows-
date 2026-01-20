@@ -2423,11 +2423,11 @@ app.registerExtension({
                             // Collect selected categories from checkboxes
                             const selectedCategoriesCheckboxes = panel.querySelectorAll('.danbooru-edit-category-checkbox:checked');
                             const selectedCategoriesToCopy = Array.from(selectedCategoriesCheckboxes).map(cb => cb.name);
-
+                    
                             // Collect tags from the editable post, respecting selected categories
                             const categories = ["artist", "copyright", "character", "general", "meta"];
                             const postToCopy = temporaryTagEdits[post.id] || post;
-
+                    
                             categories.forEach(category => {
                                 if (selectedCategoriesToCopy.includes(category)) { // Only include if category is selected
                                     const tags = postToCopy[`tag_string_${category}`];
@@ -2436,12 +2436,12 @@ app.registerExtension({
                                     }
                                 }
                             });
-
+                    
                             if (tagsToCopy.length > 0) {
                                 // 获取格式化选项
                                 const escapeBrackets = formattingDropdown.querySelector('[name="escapeBrackets"]').checked;
                                 const replaceUnderscores = formattingDropdown.querySelector('[name="replaceUnderscores"]').checked;
-
+                    
                                 // 格式化标签
                                 const processedTags = tagsToCopy.map(tag => {
                                     let processedTag = tag;
@@ -2453,15 +2453,44 @@ app.registerExtension({
                                     }
                                     return processedTag;
                                 });
-
+                    
                                 const formattedTags = processedTags.join(', ');
-
+                    
+                                // 🔧 修复核心：添加三级降级复制机制
+                                let copySuccess = false;
                                 try {
-                                    await navigator.clipboard.writeText(formattedTags);
-                                    showToast(t('copyTagsSuccess'), 'success', copyTagsButton);
+                                    // 1. 优先使用 Clipboard API（现代浏览器）
+                                    if (window.isSecureContext && navigator.clipboard) {
+                                        await navigator.clipboard.writeText(formattedTags);
+                                        copySuccess = true;
+                                    } else {
+                                        // 2. 降级使用 document.execCommand('copy')（兼容性更好）
+                                        const tempTextArea = document.createElement('textarea');
+                                        tempTextArea.value = formattedTags;
+                                        tempTextArea.style.position = 'fixed';
+                                        tempTextArea.style.opacity = '0';
+                                        document.body.appendChild(tempTextArea);
+                                        tempTextArea.select();
+                                        
+                                        try {
+                                            copySuccess = document.execCommand('copy');
+                                        } catch (e) {
+                                            copySuccess = false;
+                                        } finally {
+                                            document.body.removeChild(tempTextArea);
+                                        }
+                                    }
                                 } catch (err) {
-                                    showToast(t('copyTagsFail'), 'error', copyTagsButton);
-                                    logger.error('Failed to copy: ', err);
+                                    copySuccess = false;
+                                    logger.error('Copy to clipboard failed:', err);
+                                }
+                    
+                                if (copySuccess) {
+                                    showToast(t('copyTagsSuccess'), 'success', copyTagsButton);
+                                } else {
+                                    // 3. 最终方案：显示可手动复制的文本区域
+                                    showCopyFallbackDialog(formattedTags);
+                                    showToast(t('copyTagsFailManual'), 'warning', copyTagsButton);
                                 }
                             } else {
                                 showToast(t('noTagsToCopy'), 'info', copyTagsButton);
@@ -4953,5 +4982,6 @@ $el("style", {
     `,
     parent: document.head
 });
+
 
 
