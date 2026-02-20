@@ -2192,14 +2192,25 @@ app.registerExtension({
                             return processedTag;
                         });
                         const prompt = processedTags.join(', ');
+                        // 1. 处理角色 Tags
+                        let charTags = postToUse.tag_string_character || "";
+                        charTags = charTags.split(/\s+/).filter(t => t).join(', ');
+
+                        // 2. 处理画师 Tags
+                        let artTags = postToUse.tag_string_artist || "";
+                        artTags = artTags.split(/\s+/).filter(t => t).join(', ');
                         const selection = {
                             prompt: prompt,
                             image_url: imageUrl,
+                            character_tags: charTags, 
+                            artist_tags: artTags
                         };
                         if (nodeInstance && nodeInstance.widgets) {
                             const selectionWidget = nodeInstance.widgets.find(w => w.name === "selection_data");
                             if (selectionWidget) {
-                                selectionWidget.value = JSON.stringify(selection);
+                                selectionWidget.value = JSON.stringify({
+                                    selection: [selection]
+                                });
                                 selectionWidget.callback();
 
                             }
@@ -2902,10 +2913,19 @@ app.registerExtension({
                         if (postData) {
                             const imageUrl = postData.file_url || postData.large_file_url;
                             const prompt = buildPromptForPost(postData);
+                            // 1. 处理角色 Tags
+                            let charTags = postData.tag_string_character || "";
+                            // 按空格分割，过滤空值，再用英文逗号加空格连接
+                            charTags = charTags.split(/\s+/).filter(t => t).join(', ');
+                            // 2. 处理画师 Tags
+                            let artTags = postData.tag_string_artist || "";
+                            artTags = artTags.split(/\s+/).filter(t => t).join(', ');
                             selections.push({
                                 post_id: postId,
                                 prompt: prompt,
-                                image_url: imageUrl
+                                image_url: imageUrl,
+                                character_tags: charTags, 
+                                artist_tags: artTags
                             });
                         }
                     });

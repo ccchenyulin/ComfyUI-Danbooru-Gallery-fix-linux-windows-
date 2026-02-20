@@ -9,7 +9,7 @@ import io
 import urllib.request
 import urllib.parse
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import os
 import csv
 import re
@@ -17,8 +17,11 @@ from requests.auth import HTTPBasicAuth
 import urllib3
 from pathlib import Path
 import sys
-from ..utils.logger import get_logger
+import threading
+import concurrent.futures
 
+# 导入日志器
+from ..utils.logger import get_logger
 logger = get_logger(__name__)
 
 # 导入数据库管理器
@@ -32,15 +35,43 @@ except ImportError as e:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Danbooru API文档链接 https://danbooru.donmai.us/wiki_pages/help:api
-
 # Danbooru API的基础URL
 BASE_URL = "https://danbooru.donmai.us"
 
 # 获取插件目录路径
-# 获取当前文件所在目录
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(PLUGIN_DIR, "settings.json")
 
+# ================================
+# 异步加载相关全局变量
+# ================================
+# 全局图像缓存：key=任务ID，value={create_time: 创建时间, total: 总图像数, images: [{loaded: 布尔值, tensor: 图像张量}]}
+image_cache = {}
+cache_lock = threading.Lock()  # 线程安全锁
+# 线程池（控制并发加载数量，避免占用过多资源）
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+# 缓存清理定时器（每10分钟清理30分钟前的过期任务）
+def clean_expired_cache():
+    while True:
+        time.sleep(600)  # 10分钟检查一次
+        with cache_lock:
+            current_time = time.time()
+            expired_tasks = [
+                tid for tid, data in image_cache.items() 
+                if "create_time" in data and current_time - data["create_time"] > 1800
+            ]
+            for tid in expired_tasks:
+                del image_cache[tid]
+                logger.info(f"清理过期缓存任务: {tid}")
+
+# 启动缓存清理线程（守护线程，随程序退出）
+clean_thread = threading.Thread(target=clean_expired_cache, daemon=True)
+clean_thread.start()
+
+# ================================
+# 原始设置加载/保存函数（保持不变）
+# ================================
 def load_settings():
     """从本地文件加载所有设置"""
     default_settings = {
@@ -63,7 +94,6 @@ def load_settings():
         "autocomplete_max_results": 20,
         "selected_categories": ["copyright", "character", "general"]
     }
-
     try:
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
@@ -74,12 +104,10 @@ def load_settings():
                 return data
     except Exception as e:
         logger.error(f"加载设置失败: {e}")
-
     return default_settings
 
 def load_autocomplete_config():
     """加载自动补全配置（用于数据库优先+API fallback机制）"""
-    # 默认配置
     default_config = {
         "offline_mode": {
             "enabled": True,
@@ -90,19 +118,15 @@ def load_autocomplete_config():
             "use_database_query": True
         }
     }
-
-    # 尝试从多个位置加载配置
     config_paths = [
         Path(PLUGIN_DIR) / "config.json",
         Path(PLUGIN_DIR).parent / "config.json",
     ]
-
     for config_path in config_paths:
         if config_path.exists():
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     loaded = json.load(f)
-                    # 深度合并配置
                     if "offline_mode" in loaded:
                         default_config["offline_mode"].update(loaded["offline_mode"])
                     if "cache" in loaded:
@@ -111,7 +135,6 @@ def load_autocomplete_config():
                     return default_config
             except Exception as e:
                 logger.warning(f"[Autocomplete] 配置文件加载失败 {config_path}: {e}")
-
     logger.info("[Autocomplete] 使用默认配置")
     return default_config
 
@@ -204,9 +227,8 @@ def save_ui_settings(ui_settings):
     return save_settings(settings)
 
 # ================================
-# Tag翻译系统
+# Tag翻译系统（保持不变）
 # ================================
-
 class TagTranslationSystem:
     """Tag翻译系统，负责加载、处理和查询汉化数据"""
     
@@ -272,7 +294,6 @@ class TagTranslationSystem:
                         if len(row) >= 2 and row[0] and row[1]:
                             en_tag = row[0].strip()
                             cn_tag = row[1].strip()
-                            # 如果已存在翻译，跳过（保持第一个找到的）
                             if en_tag not in self.en_to_cn:
                                 self.en_to_cn[en_tag] = cn_tag
                             if cn_tag not in self.cn_to_en:
@@ -293,7 +314,6 @@ class TagTranslationSystem:
                         if len(row) >= 2 and row[0] and row[1]:
                             cn_tag = row[0].strip()
                             en_tag = row[1].strip()
-                            # 如果已存在翻译，跳过（保持第一个找到的）
                             if en_tag not in self.en_to_cn:
                                 self.en_to_cn[en_tag] = cn_tag
                             if cn_tag not in self.cn_to_en:
@@ -307,32 +327,25 @@ class TagTranslationSystem:
         variants_to_add = {}
         
         for en_tag, cn_tag in list(self.en_to_cn.items()):
-            # 为有下划线的tag生成无下划线版本
             if '_' in en_tag:
                 no_underscore = en_tag.replace('_', '')
                 if no_underscore not in self.en_to_cn:
                     variants_to_add[no_underscore] = cn_tag
-            
-            # 为无下划线的tag生成可能的下划线版本（基于常见模式）
             else:
-                # 在数字和字母之间添加下划线 (如: 1girl -> 1_girl)
                 with_underscore = re.sub(r'(\d)([a-zA-Z])', r'\1_\2', en_tag)
                 if with_underscore != en_tag and with_underscore not in self.en_to_cn:
                     variants_to_add[with_underscore] = cn_tag
         
-        # 添加变体到主字典
         self.en_to_cn.update(variants_to_add)
     
     def _build_chinese_search_index(self):
         """构建中文搜索索引，支持部分匹配"""
         for cn_tag in self.cn_to_en.keys():
-            # 为中文tag的每个字符建立索引
             for i, char in enumerate(cn_tag):
                 if char not in self.cn_search_index:
                     self.cn_search_index[char] = set()
                 self.cn_search_index[char].add(cn_tag)
                 
-                # 也为子字符串建立索引（2-3字符的组合）
                 for length in [2, 3]:
                     if i + length <= len(cn_tag):
                         substring = cn_tag[i:i + length]
@@ -340,7 +353,6 @@ class TagTranslationSystem:
                             self.cn_search_index[substring] = set()
                         self.cn_search_index[substring].add(cn_tag)
         
-        # 转换set为list以便JSON序列化
         for key in self.cn_search_index:
             self.cn_search_index[key] = list(self.cn_search_index[key])
             
@@ -351,15 +363,10 @@ class TagTranslationSystem:
             self.load_translation_data()
         
         tag_key = en_tag.strip()
-        
-        # 检查缓存
         if tag_key in self._translation_cache:
             return self._translation_cache[tag_key]
         
-        # 查找翻译
         translation = self.en_to_cn.get(tag_key)
-        
-        # 添加到缓存
         if len(self._translation_cache) < self.max_cache_size:
             self._translation_cache[tag_key] = translation
         
@@ -386,54 +393,49 @@ class TagTranslationSystem:
         if not query:
             return []
         
-        # 检查搜索缓存
         cache_key = f"{query}:{limit}"
         if cache_key in self._search_cache:
             return self._search_cache[cache_key]
         
-        matches = {}  # 使用字典存储匹配结果和权重
+        matches = {}
         
-        # 1. 精确匹配（权重10）
+        # 精确匹配（权重10）
         if query in self.cn_to_en:
             matches[query] = 10
         
-        # 2. 前缀匹配（权重8）
+        # 前缀匹配（权重8）
         for cn_tag in self.cn_to_en.keys():
             if cn_tag.startswith(query) and cn_tag not in matches:
                 matches[cn_tag] = 8
         
-        # 3. 索引匹配（权重6）
+        # 索引匹配（权重6）
         if query in self.cn_search_index:
             for cn_tag in self.cn_search_index[query]:
                 if cn_tag not in matches:
                     matches[cn_tag] = 6
         
-        # 4. 包含匹配（权重4）
+        # 包含匹配（权重4）
         for cn_tag in self.cn_to_en.keys():
             if query in cn_tag and cn_tag not in matches:
                 matches[cn_tag] = 4
         
-        # 5. 模糊匹配（权重2）- 支持字符顺序模糊匹配
+        # 模糊匹配（权重2）
         if len(query) >= 2:
             query_chars = set(query)
             for cn_tag in self.cn_to_en.keys():
                 if cn_tag not in matches:
                     tag_chars = set(cn_tag)
-                    # 如果查询字符的50%以上都在tag中，认为是模糊匹配
                     if len(query_chars & tag_chars) / len(query_chars) >= 0.5:
                         matches[cn_tag] = 2
         
-        # 6. 部分字符匹配（权重1）
+        # 部分字符匹配（权重1）
         for char in query:
             if char in self.cn_search_index:
                 for cn_tag in self.cn_search_index[char]:
                     if cn_tag not in matches:
                         matches[cn_tag] = 1
         
-        # 按权重和长度排序
         sorted_matches = sorted(matches.items(), key=lambda x: (-x[1], len(x[0])))
-        
-        # 转换为结果格式并限制数量
         results = []
         for cn_tag, weight in sorted_matches[:limit]:
             en_tag = self.cn_to_en.get(cn_tag)
@@ -444,7 +446,6 @@ class TagTranslationSystem:
                     'weight': weight
                 })
         
-        # 添加到缓存
         if len(self._search_cache) < self.max_cache_size:
             self._search_cache[cache_key] = results
         
@@ -466,10 +467,12 @@ def preload_translation_data():
 # 在模块加载时预加载翻译数据
 preload_translation_data()
 
+# ================================
+# 网络/认证相关函数（保持不变）
+# ================================
 def check_network_connection():
     """检测与Danbooru的网络连接状态"""
     try:
-        # 使用一个简单的公开API端点来检测连接
         test_url = f"{BASE_URL}/posts.json?limit=1"
         response = requests.get(test_url, timeout=10)
         return response.status_code == 200, False
@@ -508,29 +511,26 @@ def get_user_favorites(username, api_key):
         logger.error(f"获取用户收藏列表失败: {e}")
         return []
 
-# --- 省略其他不相关的路由和函数以保持简洁 ---
-
+# ================================
+# 路由接口（保持不变）
+# ================================
 @PromptServer.instance.routes.post("/danbooru_gallery/favorites/add")
 async def add_favorite(request):
     """添加收藏"""
     try:
         data = await request.json()
         post_id = data.get("post_id")
-
         if not post_id:
             return web.json_response({"success": False, "error": "缺少post_id"})
-
         username, api_key = load_user_auth()
         if not username or not api_key:
             return web.json_response({"success": False, "error": "请先在设置中配置用户名和API Key"})
-
         # 验证认证
         is_valid, is_network_error = verify_danbooru_auth(username, api_key)
         if is_network_error:
             return web.json_response({"success": False, "error": "网络错误，无法连接到Danbooru服务器"})
         if not is_valid:
             return web.json_response({"success": False, "error": "认证无效，请检查用户名和API Key"})
-
         try:
             favorite_url = f"{BASE_URL}/favorites.json"
             response = requests.post(
@@ -539,8 +539,6 @@ async def add_favorite(request):
                 data={"post_id": post_id},
                 timeout=15
             )
-
-
             if response.status_code in [200, 201]:
                 favorites = load_favorites()
                 if str(post_id) not in favorites:
@@ -556,7 +554,6 @@ async def add_favorite(request):
                 error_data = {}
                 reason = "无法解析响应"
                 message = response.text
-
             if response.status_code == 422 and "You have already favorited this post" in message:
                 favorites = load_favorites()
                 if str(post_id) not in favorites:
@@ -574,7 +571,6 @@ async def add_favorite(request):
             error_message = error_map.get(response.status_code, f"收藏失败，状态码: {response.status_code}, 原因: {message}")
             logger.error(error_message)
             return web.json_response({"success": False, "error": error_message})
-
         except requests.exceptions.Timeout:
             logger.error("添加收藏时网络请求超时")
             return web.json_response({"success": False, "error": "网络请求超时"})
@@ -586,7 +582,6 @@ async def add_favorite(request):
             logger.error(f"添加收藏时发生严重错误: {e}")
             logger.error(traceback.format_exc())
             return web.json_response({"success": False, "error": f"服务器内部错误: {e}"}, status=500)
-
     except Exception as e:
         logger.error(f"添加收藏接口错误: {e}")
         return web.json_response({"success": False, "error": str(e)}, status=500)
@@ -597,14 +592,12 @@ async def remove_favorite(request):
     try:
         data = await request.json()
         post_id = data.get("post_id")
-
         if not post_id:
             return web.json_response({"success": False, "error": "缺少post_id"})
         
         username, api_key = load_user_auth()
         if not username or not api_key:
             return web.json_response({"success": False, "error": "请先在设置中配置用户名和API Key"})
-
         # 验证认证
         is_valid, is_network_error = verify_danbooru_auth(username, api_key)
         if is_network_error:
@@ -616,8 +609,6 @@ async def remove_favorite(request):
             # 直接使用帖子ID删除收藏
             delete_url = f"{BASE_URL}/favorites/{post_id}.json"
             delete_response = requests.delete(delete_url, auth=HTTPBasicAuth(username, api_key), timeout=15)
-
-
             if delete_response.status_code in [200, 204]:
                 favorites = load_favorites()
                 if str(post_id) in favorites:
@@ -631,7 +622,6 @@ async def remove_favorite(request):
                     favorites.remove(str(post_id))
                     save_favorites(favorites)
                 return web.json_response({"success": True, "message": "该图片未在云端收藏，本地已同步"})
-
             # 如果有收藏记录但删除失败，解析错误
             try:
                 error_data = delete_response.json()
@@ -641,18 +631,15 @@ async def remove_favorite(request):
                 error_data = {}
                 reason = "无法解析响应"
                 message = delete_response.text
-
             error_map = {
                 401: "认证失败，请检查用户名和API Key",
                 403: "权限不足，可能需要Gold账户",
                 404: "收藏记录不存在",
                 429: "请求过于频繁，请稍后重试 (Rate Limited)",
             }
-
             error_message = error_map.get(delete_response.status_code, f"取消收藏失败，状态码: {delete_response.status_code}, 原因: {message}")
             logger.error(error_message)
             return web.json_response({"success": False, "error": error_message})
-
         except requests.exceptions.Timeout:
             logger.error("移除收藏时网络请求超时")
             return web.json_response({"success": False, "error": "网络请求超时"})
@@ -664,7 +651,6 @@ async def remove_favorite(request):
             logger.error(f"移除收藏时发生严重错误: {e}")
             logger.error(traceback.format_exc())
             return web.json_response({"success": False, "error": f"服务器内部错误: {e}"}, status=500)
-
     except Exception as e:
         logger.error(f"移除收藏接口错误: {e}")
         return web.json_response({"success": False, "error": str(e)}, status=500)
@@ -722,17 +708,14 @@ async def verify_auth(request):
         data = await request.json()
         username = data.get("username", "")
         api_key = data.get("api_key", "")
-
         if not username or not api_key:
             return web.json_response({"success": False, "error": "缺少用户名或API Key"})
-
         is_valid, is_network_error = verify_danbooru_auth(username, api_key)
         return web.json_response({"success": True, "valid": is_valid, "network_error": is_network_error})
     except Exception as e:
         logger.error(f"验证认证接口错误: {e}")
         return web.json_response({"success": False, "error": "网络错误", "network_error": True}, status=500)
 
-# --- 保留文件中剩余的其他部分 ---
 @PromptServer.instance.routes.get("/danbooru_gallery/posts")
 async def get_posts_for_front(request):
     query = request.query
@@ -740,14 +723,12 @@ async def get_posts_for_front(request):
     page = query.get("page", "1")
     limit = query.get("limit", "100")
     rating = query.get("search[rating]", "")
-
     posts_json_str, = DanbooruGalleryNode.get_posts_internal(tags=tags, limit=int(limit), page=int(page), rating=rating)
     
     try:
         posts_list = json.loads(posts_json_str)
     except json.JSONDecodeError:
         posts_list = []
-
     return web.json_response(posts_list, headers={
         "Cache-Control": "no-cache, no-store, must-revalidate",
         "Pragma": "no-cache",
@@ -760,19 +741,15 @@ async def get_autocomplete(request):
     try:
         query = request.query.get("query", "")
         limit = int(request.query.get("limit", "20"))
-
         if not query:
             return web.json_response([])
-
         # 加载配置
         config = load_autocomplete_config()
-
         # ✅ 第1层：查询本地SQLite数据库
         if get_db_manager and config['cache'].get('use_database_query', True):
             try:
                 db = get_db_manager()
                 db_results = await db.search_tags_by_prefix(query, limit)
-
                 if db_results:
                     # 数据库有结果，转换格式并返回
                     formatted_results = [
@@ -791,46 +768,36 @@ async def get_autocomplete(request):
                     logger.debug(f"[Autocomplete] 数据库无结果: '{query}'")
             except Exception as e:
                 logger.warning(f"[Autocomplete] 数据库查询失败: {e}，尝试API fallback")
-
         # ✅ 第2层：Fallback到Danbooru API
         if config['offline_mode'].get('fallback_to_remote', True):
             try:
                 timeout = config['offline_mode'].get('remote_timeout_ms', 2000) / 1000.0
-
                 tags_url = f"{BASE_URL}/tags.json"
                 params = {
                     "search[name_or_alias_matches]": f"{query}*",
                     "search[order]": "count",
                     "limit": limit
                 }
-
                 username, api_key = load_user_auth()
                 auth = HTTPBasicAuth(username, api_key) if username and api_key else None
-
                 logger.debug(f"[Autocomplete] 调用远程API: '{query}' (超时: {timeout}s)")
                 response = requests.get(tags_url, params=params, auth=auth, timeout=timeout)
                 response.raise_for_status()
-
                 result = response.json()
-
                 # 排序确保按热度排列
                 if isinstance(result, list):
                     result.sort(key=lambda x: x.get('post_count', 0), reverse=True)
                     logger.info(f"[Autocomplete] API查询成功: '{query}' -> {len(result)}条结果")
-
                 return web.json_response(result)
-
             except requests.Timeout:
                 logger.warning(f"[Autocomplete] 远程API超时 (>{timeout}s): '{query}'")
             except requests.exceptions.RequestException as e:
                 logger.warning(f"[Autocomplete] 远程API失败: {e}")
             except Exception as e:
                 logger.error(f"[Autocomplete] API调用错误: {e}")
-
         # ✅ 第3层：返回空结果
         logger.debug(f"[Autocomplete] 所有查询方式均无结果: '{query}'")
         return web.json_response([])
-
     except Exception as e:
         logger.error(f"[Autocomplete] 处理请求时发生错误: {e}")
         return web.json_response([])
@@ -913,10 +880,6 @@ async def save_ui_settings_route(request):
         logger.error(f"保存UI设置接口错误: {e}")
         return web.json_response({"success": False, "error": str(e)})
 
-# ================================
-# Tag翻译API接口
-# ================================
-
 @PromptServer.instance.routes.get("/danbooru_gallery/translate_tag")
 async def translate_tag_route(request):
     """翻译单个tag"""
@@ -960,19 +923,15 @@ async def search_chinese_route(request):
     try:
         query = request.query.get("query", "").strip()
         limit = int(request.query.get("limit", "10"))
-
         if not query:
             return web.json_response({"success": True, "results": []})
-
         # 加载配置
         config = load_autocomplete_config()
-
         # ✅ 优先使用FTS5数据库搜索（速度更快，10-50ms → 2-5ms）
         if get_db_manager and config['cache'].get('use_database_query', True):
             try:
                 db = get_db_manager()
                 db_results = await db.search_tags_optimized(query, limit, search_type="chinese")
-
                 if db_results:
                     # 转换为前端期望的格式
                     formatted_results = [
@@ -993,7 +952,6 @@ async def search_chinese_route(request):
                     })
             except Exception as e:
                 logger.warning(f"[SearchChinese] FTS5查询失败: {e}，回退到translation_system")
-
         # ⚠️ Fallback: 使用旧的translation_system（线性搜索，较慢）
         try:
             results = translation_system.search_chinese_tags(query, limit)
@@ -1009,7 +967,6 @@ async def search_chinese_route(request):
                 "success": False,
                 "error": str(e)
             })
-
     except Exception as e:
         logger.error(f"中文搜索接口错误: {e}")
         return web.json_response({"success": False, "error": str(e)})
@@ -1020,19 +977,15 @@ async def get_autocomplete_with_translation(request):
     try:
         query = request.query.get("query", "")
         limit = int(request.query.get("limit", "20"))
-
         if not query:
             return web.json_response([])
-
         # 加载配置
         config = load_autocomplete_config()
-
         # ✅ 第1层：查询本地SQLite数据库（已包含翻译）
         if get_db_manager and config['cache'].get('use_database_query', True):
             try:
                 db = get_db_manager()
                 db_results = await db.search_tags_by_prefix(query, limit)
-
                 if db_results:
                     # 数据库有结果，转换格式（已包含translation_cn）
                     formatted_results = [
@@ -1051,137 +1004,257 @@ async def get_autocomplete_with_translation(request):
                     logger.debug(f"[AutocompleteTranslation] 数据库无结果: '{query}'")
             except Exception as e:
                 logger.warning(f"[AutocompleteTranslation] 数据库查询失败: {e}，尝试API fallback")
-
         # ✅ 第2层：Fallback到Danbooru API（需要手动添加翻译）
         if config['offline_mode'].get('fallback_to_remote', True):
             try:
                 timeout = config['offline_mode'].get('remote_timeout_ms', 2000) / 1000.0
-
                 tags_url = f"{BASE_URL}/tags.json"
                 params = {
                     "search[name_or_alias_matches]": f"{query}*",
                     "search[order]": "count",
                     "limit": limit
                 }
-
                 username, api_key = load_user_auth()
                 auth = HTTPBasicAuth(username, api_key) if username and api_key else None
-
                 logger.debug(f"[AutocompleteTranslation] 调用远程API: '{query}' (超时: {timeout}s)")
                 response = requests.get(tags_url, params=params, auth=auth, timeout=timeout)
                 response.raise_for_status()
-
                 result = response.json()
-
                 # 为每个tag添加翻译
                 if isinstance(result, list):
                     for tag_data in result:
                         tag_name = tag_data.get('name', '')
                         translation = translation_system.translate_tag(tag_name)
                         tag_data['translation'] = translation
-
                     logger.info(f"[AutocompleteTranslation] API查询成功: '{query}' -> {len(result)}条结果")
-
                 return web.json_response(result)
-
             except requests.Timeout:
                 logger.warning(f"[AutocompleteTranslation] 远程API超时 (>{timeout}s): '{query}'")
             except requests.exceptions.RequestException as e:
                 logger.warning(f"[AutocompleteTranslation] 远程API失败: {e}")
             except Exception as e:
                 logger.error(f"[AutocompleteTranslation] API调用错误: {e}")
-
         # ✅ 第3层：返回空结果
         logger.debug(f"[AutocompleteTranslation] 所有查询方式均无结果: '{query}'")
         return web.json_response([])
-
     except Exception as e:
         logger.error(f"[AutocompleteTranslation] 处理请求时发生错误: {e}")
         return web.json_response([])
 
+# ================================
+# 核心节点（删除尺寸输出后）
+# ================================
 class DanbooruGalleryNode:
     _post_cache = {}
 
     @classmethod
     def INPUT_TYPES(s):
         return {
-            "required": {},
+            "required": {
+                # 加载模式开关，默认同步（和改造前一致）
+                "加载模式": (
+                    ["同步加载（直接出原图）", "异步加载（先出提示词）"],
+                    {"default": "同步加载（直接出原图）", "description": "选择是否异步加载图像"}
+                ),
+            },
             "optional": {},
             "hidden": {
                 "selection_data": ("STRING", {"default": "{}", "multiline": True, "forceInput": True}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("images", "prompts")
-    OUTPUT_IS_LIST = (True, True)
+    # 输出调整：删除尺寸输出，仅保留「提示词、图像、任务ID」
+    RETURN_TYPES = ("STRING", "IMAGE", "STRING", "STRING", "STRING")  # 提示词、图像、任务ID
+    RETURN_NAMES = ("提示词", "图像", "异步任务ID", "角色Tags", "画师Tags")
+    OUTPUT_IS_LIST = (True, True, False, True, True)  # 提示词/图像是列表，任务ID是单个字符串
     FUNCTION = "get_selected_data"
     CATEGORY = "danbooru"
     OUTPUT_NODE = True
 
     @classmethod
-    def IS_CHANGED(cls, selection_data="{}", **kwargs):
-        return selection_data
+    def IS_CHANGED(cls, selection_data="{}", 加载模式="同步加载（直接出原图）", **kwargs):
+        # 加载模式变化时也触发节点更新
+        return (selection_data, 加载模式)
 
-    def get_selected_data(self, selection_data="{}", **kwargs):
-        """处理选中的图片数据，支持单选和多选模式"""
+    # 生成友好占位图的工具函数
+    def _create_placeholder_image(self, width=512, height=512, text="加载中..."):
+        """生成带文字提示的友好占位图（浅灰背景+文字）"""
+        # 浅灰色背景（RGB: 240, 240, 240）
+        img = Image.new("RGB", (width, height), color=(240, 240, 240))
+        draw = ImageDraw.Draw(img)
+        
+        # 适配不同系统字体（优先中文支持）
+        font = None
+        font_size = min(width, height) // 10  # 字体大小随图像尺寸自适应
+        try:
+            if sys.platform == "win32":
+                font = ImageFont.truetype("simhei.ttf", size=font_size)  # Windows黑体
+            elif sys.platform == "darwin":
+                font = ImageFont.truetype("Arial Unicode.ttf", size=font_size)  # Mac兼容字体
+            else:
+                font = ImageFont.truetype("DejaVu-Sans.ttf", size=font_size)  # Linux兼容字体
+        except Exception:
+            font = ImageFont.load_default(size=font_size)  # 兜底默认字体
+        
+        # 文字居中绘制
+        text_bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+        text_x = (width - text_width) // 2
+        text_y = (height - text_height) // 2
+        draw.text((text_x, text_y), text, font=font, fill=(100, 100, 100))  # 深灰色文字
+        
+        # 转换为torch张量（格式：1, height, width, 3）
+        img_array = np.array(img).astype(np.float32) / 255.0
+        return torch.from_numpy(img_array)[None, ...]
+
+    def get_selected_data(self, selection_data="{}", 加载模式="同步加载（直接出原图）", **kwargs):
+        """
+        兼容两种模式：
+        1. 同步加载（默认）：和改造前一致，直接输出原图+提示词
+        2. 异步加载（可选）：先输出提示词+友好占位图+任务ID，后台加载原图
+        """
         if not selection_data or selection_data == "{}":
-            return ([torch.zeros(1, 1, 1, 3)], [""])
+            return (
+                [""],  # 提示词
+                [self._create_placeholder_image(512, 512, "无图像")],  # 图像（友好占位图）
+                "empty_task",  # 任务ID
+                [""],  # 角色Tags
+                [""]   # 画师Tags
+            )
 
-        images = []
         prompts = []
+        image_urls = []
+        characters = []
+        artists = []
+        task_id = f"danbooru_task_{id(selection_data)}_{int(time.time() * 1000)}"
 
         try:
             data = json.loads(selection_data)
             selections = data.get("selections", [])
-
             if not selections:
-                return ([torch.zeros(1, 1, 1, 3)], [""])
+                return (
+                    [""], 
+                    [self._create_placeholder_image(512, 512, "无图像")], 
+                    "empty_task"
+                )
 
-            for sel in selections:
-                prompt = sel.get("prompt", "")
+            # 第一步：解析提示词和URL（删除尺寸解析逻辑）
+            for idx, sel in enumerate(selections):
+                # 收集提示词
+                prompts.append(sel.get("prompt", "").strip())
+                # 收集图像URL
                 image_url = sel.get("image_url")
-                prompts.append(prompt)
+                image_urls.append(image_url)
+                characters.append(sel.get("character_tags", "").strip())
+                artists.append(sel.get("artist_tags", "").strip())
 
-                if image_url:
+            # ================================
+            # 模式1：同步加载（默认，和改造前一致）
+            # ================================
+            if 加载模式 == "同步加载（直接出原图）":
+                original_images = []
+                for idx, url in enumerate(image_urls):
+                    if url:
+                        try:
+                            # 同步下载并加载原图（和改造前逻辑完全一致）
+                            with urllib.request.urlopen(url, timeout=15) as response:
+                                img_data = response.read()
+                            img = Image.open(io.BytesIO(img_data)).convert("RGB")
+                            img_array = np.array(img).astype(np.float32) / 255.0
+                            original_images.append(torch.from_numpy(img_array)[None, ...])
+                        except Exception as e:
+                            logger.error(f"同步加载图像失败 {url}: {e}")
+                            # 加载失败时用友好占位图替代（而非黑图）
+                            original_images.append(self._create_placeholder_image(512, 512, "加载失败"))
+                    else:
+                        original_images.append(self._create_placeholder_image(512, 512, "无URL"))
+                # 返回：提示词+原图+空任务ID（空ID不影响使用）
+                return (prompts, original_images, "sync_task", characters, artists)
+
+            # ================================
+            # 模式2：异步加载（可选，先出提示词）
+            # ================================
+            else:
+                # 初始化缓存（使用默认尺寸512x512，或从URL获取真实尺寸）
+                with cache_lock:
+                    image_cache[task_id] = {
+                        "create_time": time.time(),
+                        "total": len(selections),
+                        "images": [{"loaded": False, "tensor": None} for _ in selections]
+                    }
+
+                # 后台异步加载原图（自动适配图像真实尺寸）
+                def async_load_image(idx, url):
                     try:
-                        with urllib.request.urlopen(image_url) as response:
+                        if not url:
+                            raise ValueError("无有效URL")
+                        # 下载完整图像并获取真实尺寸
+                        with urllib.request.urlopen(url, timeout=15) as response:
                             img_data = response.read()
                         img = Image.open(io.BytesIO(img_data)).convert("RGB")
                         img_array = np.array(img).astype(np.float32) / 255.0
-                        tensor = torch.from_numpy(img_array)[None,]
-                        images.append(tensor)
+                        tensor = torch.from_numpy(img_array)[None, ...]  # 保留原图尺寸
+                        # 更新缓存
+                        with cache_lock:
+                            if task_id in image_cache and idx < len(image_cache[task_id]["images"]):
+                                image_cache[task_id]["images"][idx]["tensor"] = tensor
+                                image_cache[task_id]["images"][idx]["loaded"] = True
                     except Exception as e:
-                        logger.error(f"加载图片失败 {image_url}: {e}")
-                        images.append(torch.zeros(1, 1, 1, 3))
-                else:
-                    images.append(torch.zeros(1, 1, 1, 3))
+                        logger.error(f"异步加载失败（{idx}）{url}: {e}")
+                        # 失败时用友好占位图（默认512x512）
+                        fail_placeholder = self._create_placeholder_image(512, 512, "加载失败")
+                        with cache_lock:
+                            if task_id in image_cache and idx < len(image_cache[task_id]["images"]):
+                                image_cache[task_id]["images"][idx]["tensor"] = fail_placeholder
+                                image_cache[task_id]["images"][idx]["loaded"] = True
 
-            if not images:
-                return ([torch.zeros(1, 1, 1, 3)], [""])
+                # 提交异步任务
+                for idx, url in enumerate(image_urls):
+                    executor.submit(async_load_image, idx, url)
+
+                # 生成友好占位图（默认512x512，或根据URL快速获取尺寸）
+                placeholders = []
+                for url in image_urls:
+                    if url:
+                        try:
+                            # 快速获取真实尺寸（仅下载前10KB头部，不影响性能）
+                            with urllib.request.urlopen(url, timeout=3) as response:
+                                img_header = io.BytesIO(response.read(1024 * 10))
+                                with Image.open(img_header) as img:
+                                    w, h = img.size
+                                    placeholders.append(self._create_placeholder_image(w, h, "加载中..."))
+                        except Exception:
+                            placeholders.append(self._create_placeholder_image(512, 512, "加载中..."))
+                    else:
+                        placeholders.append(self._create_placeholder_image(512, 512, "无URL"))
+                
+                # 返回：提示词+占位图+任务ID
+                return (prompts, placeholders, task_id, characters, artists)
 
         except Exception as e:
-            logger.error(f"Error processing selection in DanbooruGalleryNode: {e}")
-            return ([torch.zeros(1, 1, 1, 3)], [""])
-
-        return (images, prompts)
+            logger.error(f"处理选中数据失败: {e}", exc_info=True)
+            return (
+                [""], 
+                [self._create_placeholder_image(512, 512, "处理失败")], 
+                "error_task",
+                [""],
+                [""]
+            )
     
     @staticmethod
     def get_posts_internal(tags: str, limit: int = 100, page: int = 1, rating: str = None):
         settings = load_settings()
         cache_enabled = settings.get("cache_enabled", True)
         max_cache_age = settings.get("max_cache_age", 3600)
-
         # 创建缓存键
         cache_key = f"{tags}:{limit}:{page}:{rating}"
-
         # 如果启用了缓存，则检查缓存
         if cache_enabled:
             if cache_key in DanbooruGalleryNode._post_cache:
                 cached_data, timestamp = DanbooruGalleryNode._post_cache[cache_key]
                 if time.time() - timestamp < max_cache_age:
                     return (cached_data,)
-
         posts_url = f"{BASE_URL}/posts.json"
         
         # 分离 date: 标签和其他标签
@@ -1192,7 +1265,6 @@ class DanbooruGalleryNode:
                 date_tag = tag.strip()
             elif tag.strip():
                 other_tags.append(tag.strip())
-
         # 限制其他标签的数量
         if len(other_tags) > 2:
             other_tags = other_tags[:2]
@@ -1201,7 +1273,6 @@ class DanbooruGalleryNode:
         final_tags = ' '.join(other_tags)
         if date_tag:
             final_tags = f"{final_tags} {date_tag}".strip()
-
         if rating and rating.lower() != 'all':
             final_tags = f"{final_tags} rating:{rating}".strip()
         
@@ -1209,7 +1280,6 @@ class DanbooruGalleryNode:
         
         username, api_key = load_user_auth()
         auth = HTTPBasicAuth(username, api_key) if username and api_key else None
-
         params = {
             "tags": tags.strip(),
             "limit": limit,
@@ -1226,7 +1296,7 @@ class DanbooruGalleryNode:
             if cache_enabled:
                 DanbooruGalleryNode._post_cache[cache_key] = (result_text, time.time())
                 # 清理旧缓存（可选，防止内存无限增长）
-                if len(DanbooruGalleryNode._post_cache) > 200: # 假设最多缓存200个请求
+                if len(DanbooruGalleryNode._post_cache) > 200:  # 假设最多缓存200个请求
                     oldest_key = min(DanbooruGalleryNode._post_cache.keys(), key=lambda k: DanbooruGalleryNode._post_cache[k][1])
                     del DanbooruGalleryNode._post_cache[oldest_key]
             
@@ -1238,17 +1308,99 @@ class DanbooruGalleryNode:
             logger.error(f"发生未知错误: {e}")
             return ("[]",)
 
-# ComfyUI 必须的字典
+# ================================
+# 辅助节点：异步图像加载器（适配删除尺寸后的逻辑）
+# ================================
+class DanbooruAsyncImageLoader:
+    """辅助节点：通过任务ID获取异步加载完成的真实图像"""
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "异步任务ID": ("STRING", {"default": "", "description": "从D站画廊节点获取的任务ID"}),
+                "超时时间(秒)": ("INT", {"default": 30, "min": 5, "max": 300, "step": 5}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("加载完成的图像",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "load_async_images"
+    CATEGORY = "danbooru"
+
+    def load_async_images(self, 异步任务ID, 超时时间_秒):
+        if 异步任务ID in ["empty_task", "error_task", "sync_task", ""]:
+            logger.warning("无效/同步模式的任务ID，返回友好占位图")
+            return ([self._create_placeholder_image(512, 512, "无效ID")],)
+
+        start_time = time.time()
+        total_images = 0
+
+        # 检查任务存在性
+        with cache_lock:
+            if 异步任务ID not in image_cache:
+                logger.error(f"任务ID {异步任务ID} 不存在")
+                return ([self._create_placeholder_image(512, 512, "任务不存在")],)
+            total_images = image_cache[异步任务ID]["total"]
+
+        # 等待加载完成
+        while time.time() - start_time < 超时时间_秒:
+            with cache_lock:
+                all_loaded = all(img["loaded"] for img in image_cache[异步任务ID]["images"])
+                if all_loaded:
+                    break
+            time.sleep(0.5)
+
+        # 收集图像（保留原图真实尺寸）
+        with cache_lock:
+            task_data = image_cache.get(异步任务ID, {})
+            images = []
+            for img_info in task_data.get("images", []):
+                # 优先用加载好的原图（保留真实尺寸），无则用友好占位图
+                tensor = img_info.get("tensor") or self._create_placeholder_image(512, 512, "加载超时")
+                images.append(tensor)
+            # 清理缓存
+            if 异步任务ID in image_cache:
+                del image_cache[异步任务ID]
+
+        return (images,)
+
+    # 复用友好占位图生成函数
+    def _create_placeholder_image(self, width=512, height=512, text="加载中..."):
+        img = Image.new("RGB", (width, height), color=(240, 240, 240))
+        draw = ImageDraw.Draw(img)
+        font_size = min(width, height) // 10
+        font = None
+        try:
+            if sys.platform == "win32":
+                font = ImageFont.truetype("simhei.ttf", size=font_size)
+            elif sys.platform == "darwin":
+                font = ImageFont.truetype("Arial Unicode.ttf", size=font_size)
+            else:
+                font = ImageFont.truetype("DejaVu-Sans.ttf", size=font_size)
+        except Exception:
+            font = ImageFont.load_default(size=font_size)
+        text_bbox = draw.textbbox((0, 0), text, font=font)
+        text_x = (width - (text_bbox[2] - text_bbox[0])) // 2
+        text_y = (height - (text_bbox[3] - text_bbox[1])) // 2
+        draw.text((text_x, text_y), text, font=font, fill=(100, 100, 100))
+        img_array = np.array(img).astype(np.float32) / 255.0
+        return torch.from_numpy(img_array)[None, ...]
+
+# ================================
+# 节点映射（更新）
+# ================================
 def get_node_class_mappings():
     return {
-        "DanbooruGalleryNode": DanbooruGalleryNode
+        "DanbooruGalleryNode": DanbooruGalleryNode,
+        "DanbooruAsyncImageLoader": DanbooruAsyncImageLoader  # 新增辅助节点
     }
 
 def get_node_display_name_mappings():
     return {
-        "DanbooruGalleryNode": "D站画廊 (Danbooru Gallery)"
+        "DanbooruGalleryNode": "D站画廊 (Danbooru Gallery)",
+        "DanbooruAsyncImageLoader": "D站异步图像加载器"  # 辅助节点显示名称
     }
 
 NODE_CLASS_MAPPINGS = get_node_class_mappings()
 NODE_DISPLAY_NAME_MAPPINGS = get_node_display_name_mappings()
-
