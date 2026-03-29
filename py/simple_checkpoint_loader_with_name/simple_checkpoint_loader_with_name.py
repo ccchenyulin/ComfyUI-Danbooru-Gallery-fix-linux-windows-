@@ -7,9 +7,8 @@
 import folder_paths
 import comfy.sd
 import comfy.utils
-import os
-import sys
 
+<<<<<<< HEAD
 # 添加项目根目录到Python路径，以便导入自定义logger
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, '..', '..'))
@@ -18,6 +17,12 @@ if project_root not in sys.path:
 
 # 修改为相对路径导入(ccchenyulin)
 from ..utils.logger import get_logger
+=======
+try:
+    from ..utils.logger import get_logger
+except ImportError:
+    from py.utils.logger import get_logger
+>>>>>>> upstream/main
 
 # 设置日志
 logger = get_logger(__name__)

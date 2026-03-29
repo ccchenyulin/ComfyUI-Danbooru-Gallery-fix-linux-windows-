@@ -1050,6 +1050,7 @@ class DanbooruGalleryNode:
     @classmethod
     def INPUT_TYPES(s):
         return {
+<<<<<<< HEAD
             "required": {
                 # 加载模式开关，默认同步（和改造前一致）
                 "加载模式": (
@@ -1058,6 +1059,17 @@ class DanbooruGalleryNode:
                 ),
             },
             "optional": {},
+=======
+            "required": {},
+            "optional": {
+                # 兼容前端 bypass 解析：
+                # 该节点原本只有 hidden 输入，某些前端 bypass 路径会在无可见输入时抛出
+                # "No input found for flattened id ... slot [0]"。
+                # 增加可选透传槽位后，bypass 时不会因缺少输入槽而直接报错。
+                "bypass_image": ("IMAGE", {"forceInput": True}),
+                "bypass_prompts": ("STRING", {"forceInput": True}),
+            },
+>>>>>>> upstream/main
             "hidden": {
                 "selection_data": ("STRING", {"default": "{}", "multiline": True, "forceInput": True}),
             },

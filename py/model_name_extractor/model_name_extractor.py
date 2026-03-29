@@ -4,6 +4,7 @@
 配合 Save Image Plus 节点使用，用于保存元数据
 """
 
+<<<<<<< HEAD
 import os
 import sys
 
@@ -15,6 +16,12 @@ if project_root not in sys.path:
 
 # 相对路径导入(mwh)
 from ..utils.logger import get_logger
+=======
+try:
+    from ..utils.logger import get_logger
+except ImportError:
+    from py.utils.logger import get_logger
+>>>>>>> upstream/main
 
 # 设置日志
 logger = get_logger(__name__)
