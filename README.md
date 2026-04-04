@@ -1,16 +1,28 @@
-# comfyui在archlinux启动但comfyui的前端网页是在Windows下运行,使用open-list挂载archlinux本地目录供局域网访问,挂载目录为/mnt/d
-==以下所有修复都是基于以上环境==
-2026年2月20日给画廊节点添加画师和角色tag输出
-2026年1月18日导入模块改为使用相对路径修复节点缺失问题
+# ComfyUI 在 ArchLinux 启动但前端网页在 Windows 下运行
 
-14点21分
-修复从krita获取图像节点问题重写krita_files/open_in_krita下的所有文件匹配源代码逻辑从源代码的临时文件修改为局域网临时共享目录，新增ARGB四通道和RGB三通道下拉选择
-核心: 把krita输出的图像临时存储到局域网临时共享目录A:\D\open_in_krita,此节点包里的从krita获取数据节点加载局域网临时共享目录下的图像
+> 使用 `open-list` 挂载 ArchLinux 本地目录供局域网访问，挂载目录为 `/mnt/d`  
+> **以下所有修复都是基于以上环境**
 
-20点32分新增节点发送图像到krita
+## 2026年2月20日
+- 给画廊节点添加画师和角色 tag 输出
 
+## 2026年1月18日
+- 导入模块改为使用相对路径，修复节点缺失问题
 
-把krita_files下的open_in_krita文件夹复制到krita插件目录下如：C:\Users\mwh12\Pictures\krita-x64-5.2.14\share\krita\pykrita
+## 2026年1月某日（14:21）
+- 修复从 Krita 获取图像节点问题
+- 重写 `krita_files/open_in_krita` 下所有文件，匹配源代码逻辑
+- 从源代码的临时文件修改为局域网临时共享目录
+- 新增 ARGB 四通道和 RGB 三通道下拉选择
+
+> **核心改动**：把 Krita 输出的图像临时存储到局域网临时共享目录 `A:\D\open_in_krita`，此节点包里的“从 Krita 获取数据”节点加载该目录下的图像。
+
+## 同日（20:32）
+- 新增节点：发送图像到 Krita
+
+## 插件部署说明
+- 将 `krita_files` 下的 `open_in_krita` 文件夹复制到 Krita 插件目录，例如：  
+  `C:\Users\mwh12\Pictures\krita-x64-5.2.14\share\krita\pykrita`
 
 # Aaalice的定制节点
 
