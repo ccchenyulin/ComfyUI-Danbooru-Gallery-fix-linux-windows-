@@ -37,7 +37,132 @@ def _parse_prompt_input(prompt_input):
             
     # 对于所有其他情况（包括非字符串、非列表/元组），直接返回
     return prompt_input
-# 插件目录和设置文件路径
+
+
+def _diff_prompts(original_prompt, new_prompt):
+    """
+    对比原始prompt和新prompt，输出差异（新增/删除的tag）。
+    Returns: 差异描述字符串
+    """
+    def split_tags(prompt):
+        # 按逗号分割，去除首尾空格，过滤空项
+        return [t.strip() for t in prompt.split(',') if t.strip()]
+
+    orig_tags = set(split_tags(original_prompt))
+    new_tags = set(split_tags(new_prompt))
+
+    removed = orig_tags - new_tags
+    added = new_tags - orig_tags
+
+    lines = []
+    if removed:
+        lines.append("移除: " + ", ".join(sorted(removed)))
+    if added:
+        lines.append("新增: " + ", ".join(sorted(added)))
+    if not removed and not added:
+        lines.append("（无差异）")
+
+    return "\n".join(lines)
+
+
+def _parse_llm_output(raw_output, original_prompt=""):
+    """
+    解析LLM输出，将其分为两部分：
+    1. new_prompt: 第一行（逗号分隔的danbooru tags）
+    2. status: 替换列表 + 与原始prompt的差异对比（仅列出变化的tag）
+
+    LLM输出格式：
+    1girl, solo, short hair, ...
+
+    **已替换列表**
+    grey hair(灰发)→blue hair(蓝发)
+    long hair(长发)→swept bangs(侧分刘海)
+    ...
+
+    Returns: (new_prompt, status)
+    """
+    if not raw_output or not raw_output.strip():
+        return raw_output, ""
+
+    text = raw_output.strip()
+
+    import re
+
+    # 匹配分隔标记（支持中英文，带或不带**）
+    split_pattern = re.compile(
+        r'\n\s*\*{0,2}(已替换列表|Replaced\s*List|替换列表)\*{0,2}\s*\n',
+        re.IGNORECASE
+    )
+
+    match = split_pattern.search(text)
+
+    if match:
+        prompt_part = text[:match.start()].strip()
+        replacement_part = text[match.end():].strip()
+
+        prompt_lines = [line.strip() for line in prompt_part.split('\n') if line.strip()]
+        new_prompt = prompt_lines[0] if prompt_lines else prompt_part
+
+        status_lines = ["**已替换列表**"]
+        if replacement_part:
+            status_lines.append(replacement_part)
+        else:
+            status_lines.append("（无替换项）")
+
+        # 差异对比：仅列出变化的tag
+        if original_prompt and original_prompt.strip():
+            status_lines.append("")
+            status_lines.append("**Tag差异对比**")
+            status_lines.append(_diff_prompts(original_prompt.strip(), new_prompt))
+
+        status = "\n".join(status_lines)
+        return new_prompt, status
+
+    else:
+        # 回退：检测→箭头行
+        lines = text.split('\n')
+        prompt_lines = []
+        replacement_lines = []
+        found_replacement = False
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if '→' in stripped or '->' in stripped:
+                found_replacement = True
+                replacement_lines.append(line)
+            elif not found_replacement:
+                prompt_lines.append(line)
+            else:
+                replacement_lines.append(line)
+
+        if found_replacement and prompt_lines:
+            new_prompt = prompt_lines[0].strip()
+
+            status_lines = ["**已替换列表**"]
+            if replacement_lines:
+                status_lines.extend([l for l in replacement_lines if l.strip()])
+
+            if original_prompt and original_prompt.strip():
+                status_lines.append("")
+                status_lines.append("**Tag差异对比**")
+                status_lines.append(_diff_prompts(original_prompt.strip(), new_prompt))
+
+            status = "\n".join(status_lines)
+            return new_prompt, status
+
+        # 完全无法解析
+        non_empty_lines = [l.strip() for l in lines if l.strip()]
+        new_prompt = non_empty_lines[0] if non_empty_lines else text
+
+        status = "（未能解析替换列表）"
+        if original_prompt and original_prompt.strip():
+            status += "\n\n**Tag差异对比**\n" + _diff_prompts(original_prompt.strip(), new_prompt)
+
+        return new_prompt, status
+
+
 # 插件目录和设置文件路径
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 LLM_SETTINGS_FILE = os.path.join(PLUGIN_DIR, "llm_settings.json")
@@ -61,85 +186,6 @@ def load_llm_settings():
         },
         "timeout": 30,
         "custom_prompt": (
-            "## [角色定义]\n"
-            "你是 **SD提示词精密移植工程师**，专精 CLIP 语义权重与外科手术式特征替换。你的唯一任务：在不破坏原始构图、光照、情绪与画风的前提下，将新角色的指定特征精准移植到原始提示中，并输出替换明细。工作风格严谨、零情感、无冗余。\n\n"
-            "## [任务语境]\n"
-            "- **应用场景**：接入 API 进行自动化批量处理，输出需包含替换明细以便校验。\n"
-            "- **核心要求**：\n"
-            "    - 严格遵循 **特征白名单机制**——仅允许替换 `Features to Replace` 列表中明确指定的特征类别；原始提示中的任何其他词汇（性别、情绪、姿态、背景、构图、画质等）均为不可变保护区。\n"
-            "    - 若 `Features to Replace` 中某类别在新提示中未提供对应描述，则原始提示中对应 tag 保持不变（不列入替换列表）。\n"
-            "    - 必须完整保留原始权重括号格式（如 `(word:1.1)`）。\n"
-            "    - 严禁自动补全任何画质修饰词（如 `masterpiece, best quality, 8k`）。\n\n"
-            "## [执行指令]\n"
-            "严格按照以下步骤处理，不得跳步或自拟规则：\n\n"
-            "### 第一步：整体解析原始提示，锁定可变与不可变范围\n"
-            "1. 将 `{original_prompt}` 视为完整语义单元进行理解，不孤立拆分。\n"
-            "2. 基于语境精准判断每个 tag 的特征类别（如发型、瞳色、服装、性别、情绪等）。注意：依赖相邻 tag 确定语义（如 `long` 需结合 `hair`）。\n"
-            "3. 对照 `Features to Replace` 列表，将 tag 分为两类：\n"
-            "   - **绝对保护区**：类别不在列表中的 tag，原封不动保留。\n"
-            "   - **候选替换区**：类别在列表中的 tag，可能被替换，最终取决于新提示是否提供有效新值。\n\n"
-            "### 第二步：整体解析新角色提示，提取候选新特征\n"
-            "1. 将 `{character_prompt}` 视为完整语义单元进行理解。\n"
-            "2. 识别每个 tag 的特征类别。\n"
-            "3. 仅提取类别与 `Features to Replace` 列表匹配的 tag。\n"
-            "   - 例：列表为 `[hair style], [eye color], [clothing]` 则只提取 `short hair`、`green eyes`、`armor`。\n"
-            "4. 构建映射表：`{ 特征类别: 新 tag }`，若无对应新 tag 则留空。\n\n"
-            "### 第三步：执行选择性替换并记录变更\n"
-            "1. 初始化一个空列表 `replaced_items` 用于记录替换明细。\n"
-            "2. 遍历候选替换区的每个旧 tag：\n"
-            "   - 确定其类别，查询映射表。\n"
-            "   - 若存在新 tag：\n"
-            "       - 将 **`原始tag(中文含义)→新tag(中文含义)`** 追加到 `replaced_items` 列表中。\n"
-            "       - 用新 tag 替换旧 tag，并完整继承旧 tag 的权重括号格式。\n"
-            "   - 若不存在新 tag：保留旧 tag 不变（含权重格式），且不记录。\n"
-            "3. 绝对保护区的所有 tag 无条件保留。\n\n"
-            "### 第四步：语序重构\n"
-            "1. 检查替换后序列。\n"
-            "2. **服装/道具后置规则**：新引入的服装或道具类 tag（如 `armor`）移至序列末尾（情绪/状态类 tag 之后）。\n"
-            "3. **顺序保留规则**：其他未替换 tag 的相对顺序不变。\n\n"
-            "### 第五步：生成中文翻译\n"
-            "1. 对于 `replaced_items` 中的每个原始 tag 和新 tag，基于**第一步和第二步中已完成的整体语境解析结果**提供中文翻译。\n"
-            "2. **翻译必须与特征类别判断保持一致**：\n"
-            "   - 若某 tag 在解析时被判定为“发型”类别，则翻译时应体现发型语义（如 `long hair`→`长发`，而非孤立翻译 `long`）。\n"
-            "   - 若某 tag 包含多个单词（如 `chen hai`），应作为整体翻译，不得拆解。\n"
-            "3. **翻译原则**：\n"
-            "   - 通用描述词译为常用中文（如 `blue eyes`→`蓝眼睛`）。\n"
-            "   - 专有名词（角色名、作品名等）保留原名，并在括号内加注中文译名或简短释义（如 `chen hai(尘海)`、`vestibule of wonders(奇观门厅)`）。\n"
-            "   - 特殊字符（如转义括号 `\\(` `\\)`）原样保留，仅翻译文字部分。\n"
-            "   - 若 tag 本身已是中文或包含中文，则无需重复翻译，直接引用原词。\n\n"
-            "### 第六步：最终输出格式化\n"
-            "1. 用 `, ` 连接所有 tag 为修改后的提示词字符串，作为第一行输出。\n"
-            "2. 空一行。\n"
-            "3. 输出标题 `**已替换列表**`。\n"
-            "4. 逐行输出 `replaced_items` 中的每一条记录，格式为 `原始tag(中文含义)→新tag(中文含义)`。\n\n"
-            "## [边界限制]\n"
-            "### 允许项\n"
-            "- 替换列表中匹配且新提示有对应 tag 的特征。\n"
-            "- 继承并保留原有权重括号及数值。\n"
-            "- 服装/道具类 tag 后置调整。\n"
-            "- 输出替换明细列表。\n\n"
-            "### 禁止项（刚性约束）\n"
-            "- **严禁性别漂移**：除非列表含 `gender`/`sex`，否则禁止修改原始性别标签。\n"
-            "- **严禁情绪/状态污染**：新提示中未列入列表的情绪、姿态、动作词必须丢弃。\n"
-            "- **严禁背景/构图篡改**：禁止修改场景、视角、镜头参数。\n"
-            "- **严禁权重丢失**：替换时保留原权重格式。\n"
-            "- **严禁添加画质词**：不得添加任何原提示不存在的画质词。\n"
-            "- **严禁在提示词行之外输出任何额外解释**：仅输出提示词行和替换列表，不得有前缀、后缀或注释。\n\n"
-            "## [输出规范]\n"
-            "- **结构**：\n"
-            "  1. 第一行：修改后的提示词（纯文本，标签以 `, ` 分隔）。\n"
-            "  2. 一个空行。\n"
-            "  3. `**已替换列表**` 标题。\n"
-            "  4. 后续行：每条替换记录，格式 `原始tag(中文含义)→新tag(中文含义)`。\n"
-            "- **翻译要求**：中文含义准确，专有名词酌情加注，特殊字符原样保留。\n"
-            "- **格式范例**：\n"
-            "  ```\n"
-            "  1girl, solo, smile, short hair, green eyes, armor\n\n"
-            "  **已替换列表**\n"
-            "  long hair(长发)→short hair(短发)\n"
-            "  blue eyes(蓝眼睛)→green eyes(绿眼睛)\n"
-            "  school uniform(校服)→armor(铠甲)\n"
-            "  ```\n\n"
             "**原始提示:**\n{original_prompt}\n\n"
             "**新角色提示:**\n{character_prompt}\n\n"
             "**要替换的特征（指南）:**\n{target_features}\n\n"
@@ -166,33 +212,27 @@ def load_llm_settings():
             settings = json.load(f)
 
         migrated = False
-        # --- 迁移逻辑: 确保所有默认键都存在 ---
         for key, value in default_settings.items():
             if key not in settings:
                 migrated = True
                 settings[key] = value
         
-        # --- 迁移逻辑: 从旧的顶层 api_url/api_key 到新的 channels_config ---
         if "channels_config" not in settings or not isinstance(settings["channels_config"], dict):
              settings["channels_config"] = default_settings["channels_config"]
              migrated = True
 
-        # 检查旧的顶层字段是否存在且有值
         old_api_url = settings.get("api_url")
         old_api_key = settings.get("api_key")
         old_channel = settings.get("api_channel", "openrouter")
 
         if old_api_url and old_api_key:
-            # 如果新结构中对应的渠道没有key，则迁移旧的key
             if old_channel in settings["channels_config"] and not settings["channels_config"][old_channel].get("api_key"):
                 logger.info(f"正在迁移渠道 '{old_channel}' 的旧 API Key...")
                 settings["channels_config"][old_channel]["api_key"] = old_api_key
-                # 对于 'openai_compatible'，也迁移URL
                 if old_channel == "openai_compatible":
                     settings["channels_config"][old_channel]["api_url"] = old_api_url
                 migrated = True
 
-        # --- 迁移逻辑: 预设 ---
         if "presets" not in settings:
             migrated = True
             old_features = settings.get("target_features", default_settings["presets"][0]["features"])
@@ -201,9 +241,7 @@ def load_llm_settings():
             if "target_features" in settings:
                 del settings["target_features"]
 
-        # 如果迁移过，保存更新后的文件
         if migrated:
-            # 清理掉已经迁移的顶层废弃字段
             if "api_url" in settings: del settings["api_url"]
             if "api_key" in settings: del settings["api_key"]
             if "model" in settings: del settings["model"]
@@ -217,8 +255,6 @@ def load_llm_settings():
 def save_llm_settings(settings):
     """保存LLM设置"""
     try:
-        # 为了向后兼容，执行时仍然依赖顶层的api_url, api_key, model
-        # 所以在保存时，根据当前渠道，将分渠道的配置同步到顶层
         active_channel = settings.get("api_channel", "openrouter")
         
         if "channels_config" in settings and active_channel in settings["channels_config"]:
@@ -229,7 +265,6 @@ def save_llm_settings(settings):
         if "channel_models" in settings and active_channel in settings["channel_models"]:
             settings["model"] = settings["channel_models"][active_channel]
 
-        # 创建一个副本用于保存，移除废弃的顶层键
         settings_to_save = settings.copy()
         if "api_url" in settings_to_save: del settings_to_save["api_url"]
         if "api_key" in settings_to_save: del settings_to_save["api_key"]
@@ -266,15 +301,10 @@ import subprocess
 
 def _get_gemini_executable_path():
     """
-    Tries to find the full path to the gemini executable, as the npm global bin
-    directory may not be in the PATH for the Python process started by ComfyUI.
+    Tries to find the full path to the gemini executable.
     """
-    # On Windows, the npm global path is usually in AppData.
-    # This path might not be in the PATH for the ComfyUI environment.
     if sys.platform == "win32":
-        # We get the npm global prefix and add it to the PATH.
         try:
-            # We can't rely on `npm` being in the path, so let's try to construct the path manually.
             npm_global_path = os.path.join(os.environ.get("APPDATA", ""), "npm")
             if os.path.exists(npm_global_path):
                 logger.info(f"Adding npm global path to environment: {npm_global_path}")
@@ -282,15 +312,13 @@ def _get_gemini_executable_path():
         except Exception as e:
             logger.error(f"Failed to add npm global path to PATH: {e}")
 
-    # Now, shutil.which should be able to find 'gemini.cmd' if it was installed globally.
     gemini_executable = shutil.which("gemini")
 
     if gemini_executable:
         logger.info(f"Found Gemini CLI executable at: {gemini_executable}")
         return gemini_executable
     else:
-        logger.error("Could not find 'gemini' executable. Please ensure it is installed globally ('npm install -g @google/gemini-cli') and that the npm global bin directory is in your system's PATH.")
-        # Fallback to just "gemini" and let the subprocess call fail, which will be caught and reported to the user.
+        logger.error("Could not find 'gemini' executable.")
         return "gemini"
 
 @PromptServer.instance.routes.post("/character_swap/llm_models")
@@ -335,7 +363,6 @@ async def get_llm_models(request):
             return web.json_response({"error": "当前渠道的 API URL 为空"}, status=400)
 
         async with aiohttp.ClientSession() as session:
-            # --- Gemini API 特殊处理 ---
             if api_channel == 'gemini_api':
                 if not api_key:
                     return web.json_response({"error": "Gemini API Key为空"}, status=400)
@@ -350,7 +377,6 @@ async def get_llm_models(request):
                     ])
                     return web.json_response(model_ids)
 
-            # --- 其他 OpenAI 兼容 API 的通用处理 ---
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
             models_url = f"{api_url.rstrip('/')}/models"
             logger.info(f"[get_llm_models] Attempting to get models from: {models_url}")
@@ -364,7 +390,6 @@ async def get_llm_models(request):
     except aiohttp.ClientResponseError as e:
         error_message = f"HTTP错误: {e.status} - {e.message}"
         logger.error(f"获取LLM模型列表失败: {error_message}")
-        # API调用失败时，返回一个硬编码的列表作为回退
         fallback_models = {
             "openrouter": ["gryphe/mythomax-l2-13b", "google/gemini-flash-1.5", "anthropic/claude-3-haiku"],
             "gemini_api": [
@@ -398,8 +423,6 @@ async def debug_llm_prompt(request):
         settings = load_llm_settings()
         custom_prompt_template = settings.get("custom_prompt", "")
 
-        # 格式化最终的提示
-        # For the debug view, we don't need complex parsing, the JS sends clean strings.
         character_prompt_text = character_prompt or "[... features from character prompt ...]"
         original_prompt_text = original_prompt or "[... features from original prompt ...]"
         target_features_text = ", ".join(target_features) or "[... no features selected ...]"
@@ -445,7 +468,6 @@ async def test_llm_connection(request):
             return web.json_response({"success": False, "error": "未提供渠道(api_channel)"}, status=400)
 
         if api_channel == 'gemini_cli':
-            # 简单地检查可执行文件是否存在
             gemini_executable = _get_gemini_executable_path()
             if gemini_executable and shutil.which(gemini_executable):
                  return web.json_response({"success": True, "message": "Gemini CLI 可访问。"})
@@ -456,7 +478,6 @@ async def test_llm_connection(request):
             return web.json_response({"success": False, "error": "当前渠道的 API URL 或 API Key 为空"}, status=400)
 
         async with aiohttp.ClientSession() as session:
-            # --- Gemini API 特殊处理 ---
             if api_channel == 'gemini_api':
                 test_url = f"{api_url.rstrip('/')}/models?key={api_key}"
                 async with session.get(test_url, timeout=timeout, ssl=False) as response:
@@ -466,7 +487,6 @@ async def test_llm_connection(request):
                     else:
                         raise Exception("Gemini API 响应格式不正确。")
 
-            # --- 默认/OpenAI 兼容 API 处理 ---
             test_url = f"{api_url.rstrip('/')}/models"
             headers = {"Authorization": f"Bearer {api_key}"}
             
@@ -555,7 +575,7 @@ async def test_llm_response(request):
                     response.raise_for_status()
                     result = await response.json()
                     reply = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
-            else: # OpenAI-compatible
+            else:
                 payload = {
                     "model": model,
                     "messages": [{"role": "user", "content": "Hello!"}],
@@ -593,7 +613,6 @@ async def get_all_tags(request):
     
     tags_data = {}
 
-    # 1. 尝试加载 JSON 文件
     if os.path.exists(json_file):
         try:
             with open(json_file, 'r', encoding='utf-8') as f:
@@ -602,15 +621,13 @@ async def get_all_tags(request):
                 return web.json_response(tags_data)
         except Exception as e:
             logger.warning(f"加载 all_tags_cn.json 失败: {e}。尝试回退到 CSV。")
-            tags_data = {} # 重置以确保从CSV加载
+            tags_data = {}
 
-    # 2. 如果JSON加载失败或文件不存在，尝试加载 CSV 文件
     if not tags_data and os.path.exists(csv_file):
         try:
             import csv
             with open(csv_file, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
-                # 假设CSV格式是: 英文标签,中文翻译
                 for row in reader:
                     if len(row) >= 2:
                         tags_data[row[0]] = row[1]
@@ -619,7 +636,6 @@ async def get_all_tags(request):
         except Exception as e:
             logger.error(f"加载 danbooru.csv 也失败了: {e}")
 
-    # 3. 如果两者都失败
     if not tags_data:
         return web.json_response({"error": "Tag files not found or are invalid."}, status=404)
     
@@ -628,6 +644,9 @@ async def get_all_tags(request):
 class CharacterFeatureSwapNode:
     """
     一个使用LLM API替换提示词中人物特征的节点
+    输出:
+      - new_prompt: 经过LLM替换后的提示词（仅tags行）
+      - status: 替换列表 + 与原始prompt的对比信息
     """
     @classmethod
     def INPUT_TYPES(cls):
@@ -639,22 +658,24 @@ class CharacterFeatureSwapNode:
             },
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("new_prompt",)
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("new_prompt", "status", "raw_output")
     FUNCTION = "execute"
     CATEGORY = "danbooru"
 
     async def execute(self, original_prompt, character_prompt, target_features):
         """
         异步执行角色特征交换，支持ComfyUI中断机制
+        输出: (new_prompt, status, raw_output)
+          - new_prompt: 清洗后的tags行
+          - status: 替换列表 + tag差异对比（仅列出变化的tag）
+          - raw_output: LLM原始完整输出（用于调试）
         """
-        # 在执行开始时立即检查中断状态
         model_management.throw_exception_if_processing_interrupted()
             
         original_prompt = _parse_prompt_input(original_prompt)
         character_prompt = _parse_prompt_input(character_prompt)
 
-        # 在处理输入后再次检查中断状态
         model_management.throw_exception_if_processing_interrupted()
 
         settings = load_llm_settings()
@@ -674,27 +695,20 @@ class CharacterFeatureSwapNode:
         
         final_target_features = ", ".join(active_preset["features"]) if active_preset else target_features
 
-        # 在格式化提示词前检查中断
         model_management.throw_exception_if_processing_interrupted()
             
-        # --- 优雅地校验占位符 ---
         import re
         required_placeholders = {"original_prompt", "character_prompt", "target_features"}
         
-        # 使用 re.DOTALL 来匹配包含换行符的占位符内容
         all_found_placeholders = re.findall(r"\{(.+?)\}", custom_prompt_template, re.DOTALL)
-        
-        # 清理占位符，移除换行符等，用于检查是否存在
         cleaned_placeholders = set(ph.replace('\n', '').replace('\r', '') for ph in all_found_placeholders)
 
-        # 1. 检查缺失的占位符
         missing = required_placeholders - cleaned_placeholders
         if missing:
             error_msg = f"错误: 自定义提示词模板缺少占位符: {', '.join(missing)}。请在设置中修复。"
             logger.error(error_msg)
-            return (error_msg,)
+            return (error_msg, "", "")
 
-        # 2. 检查格式错误的占位符 (包含换行符)
         malformed_errors = []
         for ph in all_found_placeholders:
             if '\n' in ph or '\r' in ph:
@@ -706,9 +720,8 @@ class CharacterFeatureSwapNode:
         if malformed_errors:
             error_msg = "错误: 模板中发现格式错误的占位符:\n" + "\n".join(malformed_errors) + "\n请在设置中修复。"
             logger.error(error_msg)
-            return (error_msg,)
+            return (error_msg, "", "")
 
-        # 3. 如果一切正常，则尝试格式化
         try:
             prompt_for_llm = custom_prompt_template.format(
                 original_prompt=original_prompt,
@@ -716,12 +729,10 @@ class CharacterFeatureSwapNode:
                 target_features=final_target_features
             )
         except KeyError as e:
-            # 这是一个后备检查，以防有未预料到的占位符问题
             error_msg = f"错误: 格式化提示词失败，未知的占位符: {e}。请检查自定义提示词模板。"
             logger.error(error_msg)
-            return (error_msg,)
+            return (error_msg, "", "")
 
-        # 在缓存操作前检查中断
         model_management.throw_exception_if_processing_interrupted()
 
         # 缓存原始和角色提示词
@@ -740,7 +751,7 @@ class CharacterFeatureSwapNode:
             
             if not model:
                 logger.error("[Execute Gemini CLI] Error: Model not selected for Gemini CLI channel.")
-                return ("错误: Gemini CLI 渠道未选择模型。",)
+                return ("错误: Gemini CLI 渠道未选择模型。", "", "")
             
             process = None
             try:
@@ -758,14 +769,12 @@ class CharacterFeatureSwapNode:
                     env=cli_env
                 )
 
-                # 写入输入数据前检查中断
                 model_management.throw_exception_if_processing_interrupted()
                 
                 process.stdin.write(prompt_for_llm.encode('utf-8'))
                 await process.stdin.drain()
                 process.stdin.close()
 
-                # 使用更频繁的中断检查（每25ms检查一次）
                 start_time = asyncio.get_event_loop().time()
                 check_interval = 0.025
                 
@@ -775,20 +784,16 @@ class CharacterFeatureSwapNode:
                     except model_management.InterruptProcessingException:
                         logger.warning("[Execute Gemini CLI] Interruption detected. Terminating subprocess.")
                         try:
-                            # 尝试优雅终止
                             process.terminate()
-                            # 等待短时间看是否能优雅退出
                             try:
                                 await asyncio.wait_for(process.wait(), timeout=1.0)
                             except asyncio.TimeoutError:
-                                # 如果优雅终止失败，强制杀死进程
                                 logger.warning("[Execute Gemini CLI] Force killing subprocess.")
                                 process.kill()
                                 await process.wait()
                         except (ProcessLookupError, AttributeError):
-                            # 进程已经不存在
                             pass
-                        raise  # 重新抛出异常，让ComfyUI处理
+                        raise
                     
                     current_time = asyncio.get_event_loop().time()
                     if (current_time - start_time) > timeout:
@@ -802,11 +807,10 @@ class CharacterFeatureSwapNode:
                                  await process.wait()
                          except (ProcessLookupError, AttributeError):
                              pass
-                         return (f"错误: Gemini CLI 命令超时 ({timeout}s)。",)
+                         return (f"错误: Gemini CLI 命令超时 ({timeout}s)。", "", "")
 
                     await asyncio.sleep(check_interval)
 
-                # 获取输出前最后检查一次中断
                 model_management.throw_exception_if_processing_interrupted()
 
                 stdout, stderr = await process.communicate()
@@ -815,48 +819,44 @@ class CharacterFeatureSwapNode:
 
                 if process.returncode != 0:
                     logger.error(f"[Execute Gemini CLI] Subprocess failed. Stderr: {stderr_res}")
-                    return (f"Gemini CLI 错误: {stderr_res}",)
+                    return (f"Gemini CLI 错误: {stderr_res}", "", stderr_res)
 
-                new_prompt = stdout_res.strip('"')
-                return (new_prompt,)
+                raw_output = stdout_res.strip('"')
+                # ↓↓↓ 解析LLM输出 ↓↓↓
+                new_prompt, status = _parse_llm_output(raw_output, original_prompt)
+                return (new_prompt, status, raw_output)
 
             except asyncio.CancelledError:
                 logger.warning("[Execute Gemini CLI] Execution was cancelled.")
                 if process:
                     try:
-                        # 尝试优雅终止进程
                         process.terminate()
                         try:
                             await asyncio.wait_for(process.wait(), timeout=2.0)
                         except asyncio.TimeoutError:
-                            # 优雅终止失败，强制杀死
                             process.kill()
                             await process.wait()
                     except (ProcessLookupError, AttributeError):
-                        # 进程已经不存在
                         pass
-                return ("错误: 执行被用户中断。",)
+                return ("错误: 执行被用户中断。", "", "")
             except Exception as e:
                 logger.error(f"Gemini CLI 未知错误: {traceback.format_exc()}")
-                # 确保在异常情况下也能清理进程
                 if process:
                     try:
                         process.kill()
                         await process.wait()
                     except (ProcessLookupError, AttributeError):
                         pass
-                return (f"Gemini CLI 未知错误: {e}",)
+                return (f"Gemini CLI 未知错误: {e}", "", "")
 
         # --- HTTP API 执行 (异步) ---
-        # 在开始HTTP API调用前检查中断
         model_management.throw_exception_if_processing_interrupted()
             
         if not api_key:
-            return (f"错误: 渠道 '{api_channel}' 的 API Key 未设置。",)
+            return (f"错误: 渠道 '{api_channel}' 的 API Key 未设置。", "", "")
         if not model:
-            return (f"错误: 渠道 '{api_channel}' 的模型未选择。",)
+            return (f"错误: 渠道 '{api_channel}' 的模型未选择。", "", "")
 
-        # 在准备请求数据前检查中断
         model_management.throw_exception_if_processing_interrupted()
 
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -865,26 +865,21 @@ class CharacterFeatureSwapNode:
             api_endpoint = f"{api_url.rstrip('/')}/models/{model}:generateContent?key={api_key}"
             headers = {"Content-Type": "application/json"}
             payload = {"contents": [{"parts": [{"text": prompt_for_llm}]}]}
-        else: # OpenAI 兼容
+        else:
             api_endpoint = f"{api_url.rstrip('/')}/chat/completions"
             payload = {"model": model, "messages": [{"role": "user", "content": prompt_for_llm}]}
 
-        # 在发送请求前最后检查一次中断状态
         model_management.throw_exception_if_processing_interrupted()
 
         try:
             async with aiohttp.ClientSession() as session:
-                # 创建HTTP请求任务
                 async def make_http_request():
                     return await session.post(api_endpoint, headers=headers, json=payload, timeout=timeout, ssl=False)
                 
-                # 使用更短的超时时间进行分段请求，以便能够及时响应中断
                 request_task = asyncio.create_task(make_http_request())
                 
-                # 更频繁地检查中断状态（每50ms检查一次）
                 check_interval = 0.05
                 while not request_task.done():
-                    # 使用throw_exception_if_processing_interrupted进行更强制的中断
                     try:
                         model_management.throw_exception_if_processing_interrupted()
                     except model_management.InterruptProcessingException:
@@ -894,41 +889,39 @@ class CharacterFeatureSwapNode:
                             await request_task
                         except asyncio.CancelledError:
                             pass
-                        raise  # 重新抛出异常，让ComfyUI处理
+                        raise
                     
                     try:
-                        # 等待一小段时间或直到任务完成
                         await asyncio.wait_for(asyncio.shield(request_task), timeout=check_interval)
                         break
                     except asyncio.TimeoutError:
-                        # 超时说明请求还在进行，继续循环检查中断状态
                         continue
                     except asyncio.CancelledError:
-                        # 任务被取消
                         raise model_management.InterruptProcessingException()
 
                 response = request_task.result()
                 response.raise_for_status()
                 
-                # 在解析响应前再次检查中断状态
                 model_management.throw_exception_if_processing_interrupted()
                 
                 result = await response.json()
 
-                # 解析响应后最后检查一次中断状态
                 model_management.throw_exception_if_processing_interrupted()
 
                 if api_channel == 'gemini_api':
-                    new_prompt = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
-                else: # OpenAI 兼容
-                    new_prompt = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+                    raw_output = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
+                else:
+                    raw_output = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
                 
-                new_prompt = new_prompt.strip('"')
+                raw_output = raw_output.strip('"')
 
-                if not new_prompt:
-                    return ("错误: API 返回了空回复。",)
+                if not raw_output:
+                    return ("错误: API 返回了空回复。", "", "")
 
-                return (new_prompt,)
+                # ↓↓↓ 解析LLM输出为 new_prompt + status，保留 raw_output ↓↓↓
+                new_prompt, status = _parse_llm_output(raw_output, original_prompt)
+                return (new_prompt, status, raw_output)
+
         except asyncio.CancelledError:
             logger.warning("LLM API 调用被用户取消。")
             raise model_management.InterruptProcessingException()
@@ -940,13 +933,13 @@ class CharacterFeatureSwapNode:
                 pass
             error_message = f"错误: API 请求失败 (HTTP {e.status})。详情: {error_details}"
             logger.error(error_message)
-            return (error_message,)
+            return (error_message, "", "")
         except asyncio.TimeoutError:
             logger.error(f"调用LLM API超时")
-            return (f"API Error: Request timed out after {timeout} seconds.",)
+            return (f"API Error: Request timed out after {timeout} seconds.", "", "")
         except Exception as e:
             logger.error(f"处理LLM响应失败: {traceback.format_exc()}")
-            return (f"Processing Error: {e}",)
+            return (f"Processing Error: {e}", "", "")
 
 
 # 节点映射
